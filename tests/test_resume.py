@@ -690,8 +690,11 @@ class FakeSocket:
     def settimeout(self, timeout): pass
     def sendall(self, data): self.sent.append(json.loads(data[4:]))
     def recv(self, n):
+        if not self.data: raise TimeoutError('No fake IPC data is pending')
         result, self.data = self.data[:min(n, 3)], self.data[min(n, 3):]
         return result
+    def has_data(self): return bool(self.data)
+    def close(self): pass
 
 
 class TransportTests(unittest.TestCase):
@@ -789,13 +792,10 @@ class TransportTests(unittest.TestCase):
         ]
         for name, pending, failure in cases:
             with self.subTest(name=name):
-                client, peer = socket.socketpair()
+                client = FakeSocket([initial] + pending)
+                if name == 'partial-frame': client.data += struct.pack('<I', 12) + b'{'
                 try:
-                    client.settimeout(.05); peer.settimeout(.05)
                     app = Desktop('/unused', timeout=.05); app.sock = client
-                    data = FakeSocket([initial] + pending).data
-                    if name == 'partial-frame': data += struct.pack('<I', 12) + b'{'
-                    peer.sendall(data)
                     calls = []
                     def request(method, *args, **kwargs):
                         if method == 'thread-owner-discovery': return {'handledByClientId': 'owner'}
@@ -810,7 +810,7 @@ class TransportTests(unittest.TestCase):
                         self.assertEqual(app.resume(THREAD, fingerprint(state()), 'synthetic-message'), 'new')
                         self.assertEqual(calls, ['thread-follower-start-turn'])
                 finally:
-                    client.close(); peer.close()
+                    client.close()
 
     def test_fragmented_frames(self):
         app = Desktop('/unused'); app.sock = FakeSocket([{'type': 'response', 'result': 'sample'}])
