@@ -180,6 +180,16 @@ Open the URL on the same computer and paste the credential into the page. Copy i
 
 ## Using the dashboard
 
+The dashboard is an English-language local interface. This screenshot shows the
+current dashboard before connecting to the local service:
+
+![Codex Auto Resume dashboard preview](docs/dashboard-preview.png)
+
+To open it, keep the service running in a terminal, visit the printed loopback
+URL (normally `http://127.0.0.1:8765/`) on the same computer, and enter the
+connection credential printed by that same service run. The credential expires
+when the service restarts.
+
 1. Connect with the credential printed by `./resume web`.
 2. Review the five-hour and weekly usage windows.
 3. Choose **Monitor a task** and select one local Codex conversation.
