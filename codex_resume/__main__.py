@@ -1,0 +1,342 @@
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+import uuid
+
+from .app import AppError, Desktop, check_version, open_selected_thread
+from .controller import Controller
+from .policy import quota_status
+from .rpc import ReadOnlyServer
+from .runtime import codex_binary, default_app_path, discover_app_path, platform_name, process_exists
+from .store import Store
+from .tasks import inspect_task, list_conversations, stored_assessment
+
+
+def identifier(value):
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('A valid task UUID is required') from exc
+
+
+def positive(value):
+    n = int(value)
+    if not 1 <= n <= 100:
+        raise argparse.ArgumentTypeError('The count must be between 1 and 100')
+    return n
+
+
+def parser():
+    p = argparse.ArgumentParser(description='Local Codex App usage-reset resume tool')
+    p.add_argument('--home', type=Path, default=Path(os.environ.get('CODEX_HOME', Path.home() / '.codex')))
+    p.add_argument('--app', type=Path, default=None,
+                   help='macOS App bundle path or Windows Codex App codex.exe path; discovered automatically by default')
+    p.add_argument('--state-dir', type=Path, default=Path.home() / '.codex-auto-resume')
+    p.add_argument('--list-timeout', type=int, default=55,
+                   help='Maximum seconds to read the conversation list (default 55; increase for accounts with many conversations)')
+    sub = p.add_subparsers(dest='command', required=True)
+    sub.add_parser('doctor', help='Read-only check of App version, connection, and actual usage')
+    sub.add_parser('list', help='Read all available local conversations, including archived ones; none are enrolled automatically')
+    sub.add_parser('status', help='View monitoring records')
+    web = sub.add_parser('web', help='Start the local browser dashboard')
+    web.add_argument('--port', type=int, default=8765)
+    check = sub.add_parser('check', help='Read-only check of the selected conversation state and monitoring eligibility')
+    check.add_argument('thread', type=identifier)
+    stop = sub.add_parser('stop', help='Stop future automatic resumes without interrupting a running App task')
+    stop.add_argument('thread', type=identifier)
+    for name in ('start', '_watch'):
+        item = sub.add_parser(name, help='Monitor one selected task in the background' if name == 'start' else 'Internal background command; use start to launch it')
+        item.add_argument('thread', type=identifier)
+        item.add_argument('--max-resumes', type=positive, default=3, help='Maximum cumulative resume attempts for this task (default 3)')
+        item.add_argument('--limit-id', default=None, help='Select explicitly when multiple usage buckets exist; a single codex bucket is detected automatically')
+        if name == '_watch':
+            item.add_argument('--lock-fd', type=int, default=None, help=argparse.SUPPRESS)
+    return p
+
+
+def output(value):
+    print(json.dumps(value, ensure_ascii=False, indent=2), flush=True)
+
+
+def watch_process_spec(args, lock_fd=None):
+    """Build an independent watcher command for the source checkout."""
+    cmd = [sys.executable, '-m', 'codex_resume', '--home', str(args.home), '--app', str(args.app),
+                    '--state-dir', str(args.state_dir), '_watch', args.thread,
+                    '--max-resumes', str(args.max_resumes)]
+    if lock_fd is not None:
+        cmd += ['--lock-fd', str(lock_fd)]
+    if args.limit_id:
+        cmd += ['--limit-id', args.limit_id]
+    return cmd, Path(__file__).resolve().parent.parent, None
+
+
+def notify_user(thread_id, status, reason):
+    """Cross-platform user notification. Never raises; notification is best-effort."""
+    title = 'Codex Auto Resume needs your attention'
+    body = f'{status}: {reason} ({thread_id})'
+    system = platform_name()
+    try:
+        if system == 'windows':
+            # Try PowerShell toast notification; fall back to the legacy console msg.
+            shell = None
+            import shutil
+            shell = shutil.which('powershell.exe') or shutil.which('pwsh.exe')
+            if shell:
+                script = (
+                    "Add-Type -AssemblyName System.Windows.Forms; "
+                    "$n = New-Object System.Windows.Forms.NotifyIcon; "
+                    "$n.Icon = [System.Drawing.SystemIcons]::Information; "
+                    "$n.Visible = $true; "
+                    f"$n.ShowBalloonTip(8000, '{title}', '{body}', "
+                    "[System.Windows.Forms.ToolTipIcon]::Warning); "
+                    "Start-Sleep -Seconds 9; $n.Dispose()"
+                )
+                subprocess.run(
+                    [shell, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+                    check=False, timeout=12, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                # msg.exe: visible only when the user is logged in on the console session.
+                subprocess.run(['msg', '*', f'{title}\n{body}'],
+                               check=False, timeout=5, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.run(['/usr/bin/osascript',
+                            '-e', 'on run argv',
+                            '-e', 'display notification (item 2 of argv) with title (item 1 of argv)',
+                            '-e', 'end run',
+                            title, body],
+                           check=False, timeout=5, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+_LOG_MAX_BYTES = 2 * 1024 * 1024   # rotate when log exceeds 2 MB
+_LOG_KEEP_BYTES = 512 * 1024        # keep the most-recent 512 KB after rotation
+
+
+def _rotate_log_if_needed(log_path):
+    """Trim the log file in-place when it exceeds _LOG_MAX_BYTES.
+
+    Keeps the tail (_LOG_KEEP_BYTES) so recent context is always available.
+    Rotation happens before the child process is launched so the child always
+    starts with a reasonable-sized file. Failures are ignored; logs are
+    diagnostic only and must never affect the safety flow.
+    """
+    try:
+        path = log_path if isinstance(log_path, Path) else Path(log_path)
+        if path.is_symlink():
+            return
+        size = path.stat().st_size if path.exists() else 0
+        if size <= _LOG_MAX_BYTES:
+            return
+        with open(path, 'rb') as f:
+            f.seek(-_LOG_KEEP_BYTES, 2)
+            tail = f.read(_LOG_KEEP_BYTES)
+        header = (
+            b'[log rotated: file exceeded 2 MB; keeping most recent 512 KB]\n'
+        )
+        with open(path, 'wb') as f:
+            f.write(header)
+            f.write(tail)
+    except Exception:
+        pass
+
+
+def serve_watch(args, store):
+    if platform_name() == 'windows' and args.lock_fd is None:
+        for attempt in range(50):
+            try:
+                store.lock(args.thread)
+                break
+            except RuntimeError:
+                if attempt == 49:
+                    raise
+                time.sleep(0.1)
+    else:
+        store.lock(args.thread, inherited_fd=args.lock_fd)
+    quota = None
+    def read_quota():
+        nonlocal quota
+        if quota is None:
+            reader = ReadOnlyServer(codex_binary(args.app), args.home)
+            reader.__enter__()
+            quota = reader
+        try:
+            return quota.query('account/rateLimits/read')
+        except Exception:
+            quota.__exit__(None, None, None)
+            quota = None
+            raise
+    def load_original(tid):
+        # Revalidate eligibility before navigation as well as before dispatch.
+        with ReadOnlyServer(codex_binary(args.app), args.home) as reader:
+            if any(r['id'] == tid for r in list_conversations(reader, (True,))):
+                return False
+            saved = reader.query('thread/read', {'threadId': tid, 'includeTurns': True})
+        if not stored_assessment(saved.get('thread'), tid)['canMonitor']:
+            return False
+        if not store.get(tid)['enabled']:
+            return False
+        open_selected_thread(args.app, tid)
+    controller = Controller(args.thread, store, lambda: Desktop(args.home, args.app), read_quota, args.limit_id,
+                            open_thread=load_original,
+                            notify=lambda status, reason: notify_user(args.thread, status, reason))
+    previous = None
+    try:
+        while controller.step():
+            state = store.get(args.thread)
+            status = (state['status'], state['reason'])
+            if status != previous:
+                output({'time': time.time(), 'status': status[0], 'reason': status[1]})
+                previous = status
+            # Small cancellable sleeps; after wake from system sleep step() rechecks everything.
+            for _ in range(30):
+                if not store.get(args.thread)['enabled']:
+                    return
+                time.sleep(1)
+        state = store.get(args.thread)
+        output({'status': state['status'], 'reason': state['reason']})
+    finally:
+        if quota:
+            quota.__exit__(None, None, None)
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
+    # status/stop never touch the engine; discovery ambiguity must not block
+    # them. web defers discovery to the calls that need the engine, so its
+    # watch list and stop action stay available when discovery is ambiguous.
+    if args.app is None and args.command != 'web':
+        args.app = (default_app_path() if args.command in ('status', 'stop')
+                    else discover_app_path())
+    args.home = args.home.expanduser().absolute()
+    args.state_dir = args.state_dir.expanduser().absolute()
+    if args.app is not None:
+        args.app = args.app.expanduser().absolute()
+    if args.command == 'web':
+        from .web import serve
+        serve(args)
+        return
+    if args.command in ('doctor', 'check', 'list', 'start', '_watch'):
+        version = check_version(args.app)
+    if args.command == 'check':
+        result = inspect_task(args.home, args.app, args.thread, list_timeout=args.list_timeout)
+        output(dict(result, note='Read-only check; no task was opened, monitoring was started, or message was sent'))
+        return
+    if args.command in ('doctor', 'list'):
+        with ReadOnlyServer(codex_binary(args.app), args.home) as server:
+            if args.command == 'list':
+                output(list_conversations(server, timeout=args.list_timeout))
+                return
+            with Desktop(args.home, args.app, read_only=True):
+                pass
+            quota = server.query('account/rateLimits/read')
+            ready, next_check, reason = quota_status(quota, time.time())
+            output({'app': version, 'ipc': 'connected', 'quotaRead': 'ok',
+                    'autoResumeAllowed': True,
+                    'ready': ready, 'nextCheck': next_check,
+                    'reason': reason, 'quotaReason': reason,
+                    'rateLimits': quota.get('rateLimits'),
+                    'note': 'A successful read-only probe does not mean a specific task can be resumed'})
+        return
+    store = Store(args.state_dir)
+    try:
+        if args.command == 'status':
+            rows = store.all()
+            for row in rows:
+                row['attempts'] = store.count(row['thread_id'])
+                if row.get('pid') and row['enabled']:
+                    row['process'] = ('pid_exists_not_identity_verified' if process_exists(row['pid'])
+                                      else 'not_running')
+            output(rows)
+        elif args.command == 'stop':
+            store.stop(args.thread)
+            output({'stopped': args.thread, 'note': 'Only future automatic resumes are canceled; messages already sent cannot be retracted'})
+        elif args.command == '_watch':
+            serve_watch(args, store)
+        elif args.command == 'start':
+            # Validate the exact thread before arming a background process.
+            assessment = inspect_task(args.home, args.app, args.thread,
+                                      list_timeout=args.list_timeout)
+            if not assessment['canMonitor']:
+                raise RuntimeError(assessment['reason'])
+            if store.uncertain(args.thread):
+                raise RuntimeError('This task has an unconfirmed send record; review it manually; do not take over automatically')
+            if store.count(args.thread) >= args.max_resumes:
+                raise RuntimeError('The cumulative attempt limit has been reached; review records before deciding whether to increase --max-resumes')
+            store.lock(args.thread)
+            current = store.get(args.thread)
+            if current and current['enabled']:
+                raise RuntimeError('This task already has a monitoring process or an unconfirmed start record')
+            store.arm(args.thread, args.max_resumes)
+            # Keep the same flock held across process creation. The child adopts
+            # this descriptor; closing only the parent's copy cannot unlock it.
+            windows = platform_name() == 'windows'
+            lock_fd = None if windows else store.lock_file.fileno()
+            log = args.state_dir / (args.thread + '.log')
+            cmd, child_cwd, child_env = watch_process_spec(args, lock_fd)
+            try:
+                if log.is_symlink():
+                    raise RuntimeError('Refusing to use a symlink as the log file')
+                _rotate_log_if_needed(log)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, 'O_NOFOLLOW', 0)
+                fd = os.open(log, flags, 0o600)
+                with os.fdopen(fd, 'ab') as stream:
+                    options = dict(cwd=child_cwd, env=child_env, stdin=subprocess.DEVNULL,
+                                   stdout=stream, stderr=stream, start_new_session=True)
+                    if windows:
+                        options.pop('start_new_session')
+                        options['creationflags'] = (getattr(subprocess, 'DETACHED_PROCESS', 0x00000008)
+                                                    | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200))
+                    elif lock_fd is not None:
+                        options['pass_fds'] = (lock_fd,)
+                    child = subprocess.Popen(cmd, **options)
+                if windows:
+                    # The child retries this exact lock while the parent's copy is
+                    # released. The enabled ledger row blocks a competing start.
+                    store.release_lock()
+            except Exception:
+                store.update(args.thread, 'blocked', 'Background process failed to start; monitoring was not enabled', True,
+                             only_enabled=True)
+                raise
+            # Verify child liveness and its first ledger update, rather than claim launch from Popen alone.
+            for _ in range(40):
+                state = store.get(args.thread)
+                if state['status'] != 'starting' or child.poll() is not None:
+                    break
+                time.sleep(0.1)
+            if child.poll() is not None:
+                if store.get(args.thread)['status'] == 'starting':
+                    store.update(args.thread, 'blocked', 'Background process failed to start', True, only_enabled=True)
+                raise RuntimeError('Background monitoring stopped; use status to see why')
+            output({'threadId': args.thread, 'pid': child.pid, 'log': str(log),
+                    'status': store.get(args.thread)['status'],
+                    'note': 'Only the selected task is monitored; actions are never approved automatically. Keep the App open.'})
+    finally:
+        store.close()
+
+
+def cli():
+    try:
+        main()
+    except KeyboardInterrupt:
+        print('Operation canceled', file=sys.stderr)
+        sys.exit(130)
+    except Exception as exc:
+        # Known local errors contain no session content. Other exceptions stay generic.
+        from .app import AppError
+        if isinstance(exc, (AppError, RuntimeError, ValueError)):
+            print(str(exc), file=sys.stderr)
+        else:
+            print('Operation failed; check the App, directory permissions, and network. Sends are not retried automatically.', file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    cli()

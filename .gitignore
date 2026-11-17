@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+.build/
+dist/
+
+# Local development notes and real-account validation evidence never ship.
+.light-dev/
+node_modules/
+tests/evidence/*
+*.log
+.env
+.env.*
+*.pem
+*.key
+*.sqlite*
+*.db

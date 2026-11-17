@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#12695c"><meta name="color-scheme" content="light">
+  <title>Codex Auto Resume · Codex Relay</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to main content</a>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="#overview" aria-label="Codex Auto Resume home"><img src="/icon.svg" width="38" height="38" alt=""><span>Auto Resume<small>CODEX RELAY</small></span></a>
+    <p class="side-caption">Keep long tasks moving</p>
+    <nav aria-label="Main navigation">
+      <a href="#overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg>Dashboard</a>
+      <a href="#tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>Monitored tasks <span id="nav-count" class="count">0</span></a>
+    </nav>
+    <div class="side-bottom"><span class="pill">Local source build</span><p>Your work stays in Codex App.<br>Auto Resume only waits and continues.</p><small id="version">Checking App version</small></div>
+  </aside>
+  <main id="main">
+    <header class="topbar"><span>Local workstation <span class="slash">/</span> Resume manager</span><span class="connection-state" id="connection-state">Not connected</span></header>
+    <section id="overview" class="overview">
+      <div class="page-heading"><div><p class="eyebrow">WORK CONTINUES</p><h1>Let Auto Resume handle the wait.</h1><p class="subtitle">Continue the original task when usage naturally resets.</p></div><button class="button secondary" id="refresh" disabled>Refresh status</button></div>
+      <section id="login-panel" class="login-panel" aria-labelledby="login-heading">
+        <div><span class="pill">Connect to the local service</span><h2 id="login-heading">You stay in control of your tasks.</h2><p>Enter the connection credential printed when the service started. It stays in this tab and must be entered again after a server restart.</p></div>
+        <form id="login-form"><label for="token">Connection credential</label><div class="input-row"><input id="token" name="token" type="password" autocomplete="off" required placeholder="Copy from the service terminal" spellcheck="false"><button class="button primary" type="submit">Connect</button></div><p id="login-error" class="error" role="alert"></p></form>
+      </section>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <section id="mutation-warning" class="notice warning" role="status" hidden>
+        <strong>Action safeguard</strong><p id="mutation-description"></p>
+        <button id="refresh-mutation" class="button secondary" type="button">Refresh monitoring records</button>
+        <label class="confirmation"><input id="confirm-mutation-review" type="checkbox"><span>I reviewed the result locally and confirmed no request is still processing; allow this browser's safeguard to be cleared.</span></label>
+        <button id="acknowledge-mutation" class="button secondary" type="button" disabled>Clear safeguard only; do not retry</button>
+      </section>
+      <section class="quota-board" aria-labelledby="quota-heading">
+        <div class="section-top"><h2 id="quota-heading">Usage windows</h2><span class="meta" id="quota-updated">Real usage is read after connecting</span></div>
+        <div class="quota-grid">
+          <article class="quota-window"><div class="quota-label"><span>Five-hour window</span><span class="pill muted">Short cycle</span></div><div class="quota-number"><strong id="primary-percent">—</strong><span>Remaining usage</span></div><progress id="primary-bar" max="100" value="0" aria-label="Five-hour window remaining usage"></progress><div class="quota-footer"><span id="primary-reset">Reset time not yet read</span><span id="primary-clock" class="mono">—</span></div></article>
+          <article class="quota-window"><div class="quota-label"><span>Weekly window</span><span class="pill muted">Long cycle</span></div><div class="quota-number"><strong id="secondary-percent">—</strong><span>Remaining usage</span></div><progress id="secondary-bar" max="100" value="0" aria-label="Weekly window remaining usage"></progress><div class="quota-footer"><span id="secondary-reset">Reset time not yet read</span><span id="secondary-clock" class="mono">—</span></div></article>
+        </div>
+        <div class="quota-note"><span class="dot" aria-hidden="true"></span><span id="quota-reason">Reads account status only. Does not run a model, buy usage, or reset limits.</span></div>
+      </section>
+      <section id="tasks" class="tasks-section" aria-labelledby="tasks-heading">
+        <div class="section-top"><div><h2 id="tasks-heading">Monitored tasks <span id="task-count" class="subtle">0</span></h2><p class="section-description">Choose a long task → wait for usage to reset → continue in the original conversation.</p></div><button class="button primary" id="choose-task" disabled><span aria-hidden="true">＋</span> Monitor a task</button></div>
+        <p id="watch-error" class="error" role="alert"></p>
+        <div id="watch-list" class="watch-list"><div class="empty-state"><div class="relay-symbol" aria-hidden="true"><span></span><i></i><span></span></div><h3>No monitored tasks yet</h3><p>After connecting, choose a running task or one paused by a usage limit.<br>If it stops because usage is exhausted, Auto Resume will wait for a reset.</p><span class="empty-note">Never takes over other tasks · Never approves actions automatically</span></div></div>
+        <p class="freshness" id="watch-updated">Monitoring records have not been read</p>
+      </section>
+      <section class="how-it-works" aria-label="How Auto Resume works"><div><span class="step-index">1</span><strong>Detect a usage limit</strong><p>Normal completion or manual stop will not trigger a resume.</p></div><div><span class="step-index">2</span><strong>Wait for a natural reset</strong><p>Checks both five-hour and weekly usage windows.</p></div><div><span class="step-index">3</span><strong>Continue the original task</strong><p>Keeps model settings and does not bypass approvals.</p></div></section>
+      <footer><span>Codex Auto Resume · A focused companion for Codex</span><span>macOS verified · Windows preview</span><button id="disconnect" class="text-button" hidden>Disconnect this page</button></footer>
+    </section>
+  </main>
+</div>
+<dialog id="task-dialog" aria-labelledby="dialog-title">
+  <div class="dialog-heading"><div><p class="eyebrow">SELECT A TASK</p><h2 id="dialog-title">Choose a long-running task</h2></div><button id="close-dialog" class="close-button" aria-label="Close task selector">×</button></div>
+  <div class="dialog-content"><div id="picker-browser"><div id="picker-controls"><p class="section-description">Choose a running task or one paused by a usage limit. It will continue in the original conversation after the reset.</p>
+    <label for="search">Search local conversations</label><input id="search" type="search" placeholder="Enter a conversation title" autocomplete="off"><p id="thread-error" class="error" role="alert"></p>
+    <div class="picker-toolbar"><label class="confirmation"><input id="show-archived" type="checkbox"><span>Show archived conversations</span></label><p id="thread-count" class="meta" role="status"></p></div>
+
+    </div><div id="thread-options" class="thread-options" aria-label="Local conversations"></div>
+    <form id="check-form"><details id="manual-selection" class="manual-selection"><summary>Enter a conversation ID (advanced)</summary><p class="field-help">Use only to locate a task precisely or troubleshoot. Normally, choose a conversation from the list.</p><label for="thread-id">Conversation UUID</label><input id="thread-id" type="text" required autocomplete="off" spellcheck="false" placeholder="Paste the full conversation ID"></details><button class="button secondary" type="submit" id="check-button" hidden>Check task</button></form>
+    </div><div id="task-details" hidden>
+    <div id="selected-task" class="selected-task" role="status" hidden><span class="pill">Selected</span><strong id="selected-title"></strong></div>
+    <div id="check-result" class="check-result" role="status" hidden></div>
+    <form id="start-form" hidden><div class="form-columns"><div><label for="max-resumes">Maximum total resumes</label><input id="max-resumes" type="number" min="1" max="100" value="3" required><p class="field-help">Includes previous attempts; restarting does not reset the count.</p></div><details><summary>Advanced settings</summary><div><label for="limit-id">Usage bucket ID (optional)</label><input id="limit-id" type="text" placeholder="Defaults to the single codex bucket" maxlength="100"><p class="field-help">Choose explicitly when multiple usage buckets exist.</p></div></details></div><label class="confirmation"><input id="confirm-start" type="checkbox" required><span>Monitor only this task and allow the tool to open its original conversation when needed. I will close other queued messages and resume automations; stopping monitoring cannot retract a message already sent.</span></label><button class="button primary full" type="submit" id="start-button">Start monitoring</button></form>
+    </div><p id="action-error" class="error" role="alert"></p>
+  </div>
+</dialog>
+<dialog id="stop-dialog" aria-labelledby="stop-title"><div class="dialog-heading"><h2 id="stop-title">Stop monitoring this task?</h2></div><div class="dialog-content"><p id="stop-task" class="selected-title"></p><p>This only cancels future automatic resumes. Messages already sent cannot be retracted, and a Codex task already running will not be interrupted.</p><div class="dialog-actions"><button id="cancel-stop" class="button secondary">Keep monitoring</button><button id="confirm-stop" class="button danger">Stop monitoring</button></div><p id="stop-error" class="error" role="alert"></p></div></dialog>
+</body></html>

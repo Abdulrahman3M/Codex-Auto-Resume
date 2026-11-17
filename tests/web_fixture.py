@@ -1,0 +1,54 @@
+"""Explicitly synthetic browser test data; never reads or resumes real App tasks.
+Run: python3 tests/web_fixture.py (loopback 8876, token ui-test-only).
+"""
+from pathlib import Path
+import sys
+import time
+from types import SimpleNamespace
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from codex_resume.web import APIError, Backend, CompanionServer
+
+THREAD='11111111-1111-4111-8111-111111111111'
+COMPLETE='22222222-2222-4222-8222-222222222222'
+
+class Fixture(Backend):
+    def __init__(self, trace=False):
+        super().__init__(SimpleNamespace())
+        self.rows=[]
+        self.trace=trace
+    def command(self, action, *args):
+        if self.trace:
+            import json
+            print(json.dumps({'syntheticAction':action}),flush=True)
+        if action=='status': return self.rows
+        if action=='doctor':
+            return {'app':{'version':'UI fixture','build':'synthetic'},'ipc':'connected','ready':False,
+                'reason':'Synthetic data: waiting for the five-hour window reset; no real account connection',
+                'rateLimits':{'limitId':'codex','primary':{'usedPercent':100,'resetsAt':time.time()+1800},
+                              'secondary':{'usedPercent':28,'resetsAt':time.time()+86400}}}
+        if action=='list': return [{'id':THREAD,'name':'[Synthetic] Build the local Web dashboard for the resume tool','cwd':'/synthetic'},
+                                   {'id':COMPLETE,'name':'[Synthetic] Completed task <script>','cwd':'/synthetic'}]
+        if action=='check':
+            return {'threadId':args[0],'title':'[Synthetic] Companion interface development','decision':'stop' if args[0]==COMPLETE else 'wait',
+                    'taskState':'idle' if args[0]==COMPLETE else 'running',
+                    'canMonitor':args[0]!=COMPLETE, 'source':'live', 'connection':'connected',
+                    'reason':'Turn completed normally; no further work is inferred' if args[0]==COMPLETE else 'Task is running; waiting to observe',
+                    'model':'test-model'}
+        if action=='start':
+            self.rows=[{'thread_id':args[0],'enabled':1,'status':'waiting_quota','reason':'Synthetic data: usage exhausted; waiting for a natural reset',
+                        'attempts':0,'max_resumes':int(args[2]),'updated':time.time()}]
+            return {'threadId':args[0],'status':'waiting_quota'}
+        if action=='stop':
+            for row in self.rows:
+                if row['thread_id']==args[0]: row.update(enabled=0,status='paused',reason='The user disabled automatic resumes',updated=time.time())
+            return {'stopped':args[0]}
+        raise APIError('Unsupported simulated action')
+
+if __name__=='__main__':
+    import argparse
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--trace',action='store_true')
+    args=parser.parse_args()
+    with CompanionServer(('127.0.0.1',8876),Fixture(trace=args.trace),token='ui-test-only') as server:
+        print('Synthetic UI only: http://127.0.0.1:8876/ ; token ui-test-only',flush=True)
+        server.serve_forever()
